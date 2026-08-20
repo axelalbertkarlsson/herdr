@@ -129,6 +129,15 @@ enum PlacementParseState {
 /// while a false placement puts it on the wrong cell.
 const CURSOR_POSITIONING_FINALS: &[u8] = b"ABCDEFGHIZdefa`";
 
+/// CSI final bytes that erase or edit at the cursor.
+///
+/// An application that positions the cursor in order to clear or edit that spot
+/// has not chosen it as the cursor's home: this is how a redraw clears the tail
+/// of a row, and the frame's real cursor placement is emitted after all such
+/// edits. Treating what those leave behind as incidental is what keeps the
+/// cursor off the row a frame happened to clear last.
+const CURSOR_INCIDENTAL_FINALS: &[u8] = b"JKLMPX@";
+
 impl CursorPlacementTracker {
     pub(crate) fn observe(&mut self, bytes: &[u8]) {
         for &byte in bytes {
@@ -171,6 +180,8 @@ impl CursorPlacementTracker {
                 } else if (0x40..=0x7e).contains(&byte) {
                     if CURSOR_POSITIONING_FINALS.contains(&byte) {
                         self.placement = CursorPlacement::Positioned;
+                    } else if CURSOR_INCIDENTAL_FINALS.contains(&byte) {
+                        self.placement = CursorPlacement::Printed;
                     }
                     self.state = PlacementParseState::Ground;
                 }
@@ -496,8 +507,18 @@ mod tests {
         tracker.observe(b"\x1b[12;9H\x1b]0;codex\x07");
         assert_eq!(tracker.placement(), CursorPlacement::Positioned);
 
-        // Styling, erases and mode changes do not move the cursor.
-        tracker.observe(b"\x1b[1;32m\x1b[2K\x1b[?25h");
+        // Styling and mode changes do not move the cursor.
+        tracker.observe(b"\x1b[24;1H\x1b[1;32m\x1b[?25h");
+        assert_eq!(tracker.placement(), CursorPlacement::Positioned);
+
+        // Positioning in order to erase is not a placement. This is the measured
+        // tail of a real agent frame: it clears the end of its status row, shows
+        // the cursor and closes the block, and places its caret only afterwards.
+        tracker.observe(b"\x1b[m\x1b[14;66H\x1b[K\x1b[?25h\x1b[?2026l");
+        assert_eq!(tracker.placement(), CursorPlacement::Printed);
+
+        // The placement that follows the erase is the real one.
+        tracker.observe(b"\x1b[12;9H\x1b[?25h");
         assert_eq!(tracker.placement(), CursorPlacement::Positioned);
 
         // A sequence split across read batches still parses.
