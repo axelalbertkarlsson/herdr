@@ -1332,7 +1332,12 @@ impl GhosttyPaneTerminal {
             .terminal
             .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
             .unwrap_or(false);
-        if CURSOR_POSITION_SETTLE_ENABLED {
+        // A child inside its own synchronized output block is mid-frame, so the
+        // cursor is wherever its last painted cell left it rather than where it
+        // means the cursor to be. Herdr already declines to render and to publish
+        // a cursor until the block closes, so it must not record a position from
+        // inside one either.
+        if CURSOR_POSITION_SETTLE_ENABLED && !synchronized_output {
             let cursor_started = crate::render_prof::timer();
             let cursor_after_write = observed_cursor_state(&core);
             crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
@@ -4166,6 +4171,53 @@ mod tests {
         assert_eq!(placed.render_delay, Some(CURSOR_POSITION_SETTLE));
         // Either caret position is fine once the child's placement arrives; the
         // repainted row must not be.
+        let reported = pane
+            .cursor_state()
+            .map(|cursor| (cursor.x, cursor.y, cursor.visible));
+        assert!(
+            matches!(reported, Some((7, 19, true)) | Some((8, 19, true))),
+            "cursor left the input line: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_state_ignores_positions_from_inside_a_synchronized_redraw() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        // The child parks its caret on its input line.
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[20;8H", &tx);
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((7, 19, true))
+        );
+
+        // A child that brackets a frame in synchronized output is telling us the
+        // frame is incomplete until the closing sequence arrives, so every cursor
+        // position inside the bracket is wherever its last painted cell left it.
+        // Nothing renders and no cursor is published while the bracket is open, so
+        // what matters is that those positions never enter the settle state and
+        // outlive the frame they came from.
+        let opened = pane.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert!(!opened.request_render);
+
+        let painted = pane.process_pty_bytes(pane_id, 0, b"\x1b[24;1HReady", &tx);
+        assert!(!painted.request_render);
+        assert_eq!(painted.render_delay, None);
+        assert!(
+            !cursor_position_settle_pending(&pane.core.lock().unwrap()),
+            "a paint position from inside the child's synchronized redraw must not \
+             become a pending cursor candidate"
+        );
+
+        // Closing the bracket is the child's own statement that the frame is
+        // finished, so the position it leaves behind is the one worth adopting.
+        let closed = pane.process_pty_bytes(pane_id, 0, b"\x1b[20;9H\x1b[?2026l", &tx);
+        assert!(closed.request_render);
+        assert_eq!(closed.render_delay, Some(CURSOR_POSITION_SETTLE));
         let reported = pane
             .cursor_state()
             .map(|cursor| (cursor.x, cursor.y, cursor.visible));

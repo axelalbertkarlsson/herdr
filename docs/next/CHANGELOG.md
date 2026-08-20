@@ -9,6 +9,7 @@
 - Unix plugin pane commands now default `PWD` to their resolved working directory, so direct popup tools open at explicit `--cwd` paths while preserving caller-provided `PWD` values. (#2984)
 - Pane cursors no longer latch onto the row a running application painted last, so an agent's status footer stops stealing the cursor from its input line.
 - Cursor positions from a redraw still in progress are now settled on macOS and Linux too, instead of only on Windows.
+- Pane cursors now ignore positions taken from inside an application's own unfinished synchronized redraw, so holding a key in an agent's composer no longer flashes the cursor onto its status line.
 
 ## [0.8.2] - 2026-08-19
 
