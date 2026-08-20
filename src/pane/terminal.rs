@@ -19,7 +19,9 @@ use crate::protocol::CellData;
 #[cfg(windows)]
 mod windows_recent_fallback;
 
-use super::cursor::{CursorPositionSettleState, DecscusrTracker, CURSOR_POSITION_SETTLE};
+use super::cursor::{
+    CursorPlacementTracker, CursorPositionSettleState, DecscusrTracker, CURSOR_POSITION_SETTLE,
+};
 use super::{
     input::{
         ghostty_key_event_from_terminal_key, ghostty_mouse_encoder_for_terminal,
@@ -190,6 +192,7 @@ pub(crate) struct GhosttyPaneCore {
     pub agent_osc_state: AgentOscStateTracker,
     pub xtgettcap_query_tracker: XtgettcapQueryTracker,
     decscusr_tracker: DecscusrTracker,
+    cursor_placement_tracker: CursorPlacementTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
 }
@@ -1067,6 +1070,7 @@ impl GhosttyPaneTerminal {
                 agent_osc_state: AgentOscStateTracker::default(),
                 xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
                 decscusr_tracker: DecscusrTracker::default(),
+                cursor_placement_tracker: CursorPlacementTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
             }),
@@ -1296,6 +1300,8 @@ impl GhosttyPaneTerminal {
         core.xtgettcap_query_tracker
             .observe(filtered_bytes.as_ref());
         core.decscusr_tracker.observe(filtered_bytes.as_ref());
+        core.cursor_placement_tracker
+            .observe(filtered_bytes.as_ref());
         let in_progress_default_color_event = core.default_color_event_tracker.in_progress_event();
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
@@ -1332,17 +1338,25 @@ impl GhosttyPaneTerminal {
             .terminal
             .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
             .unwrap_or(false);
-        // A child inside its own synchronized output block is mid-frame, so the
-        // cursor is wherever its last painted cell left it rather than where it
-        // means the cursor to be. Herdr already declines to render and to publish
-        // a cursor until the block closes, so it must not record a position from
-        // inside one either.
-        if CURSOR_POSITION_SETTLE_ENABLED && !synchronized_output {
-            let cursor_started = crate::render_prof::timer();
-            let cursor_after_write = observed_cursor_state(&core);
-            crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
-            core.cursor_settle_state
-                .observe(cursor_after_write, Instant::now());
+        if CURSOR_POSITION_SETTLE_ENABLED {
+            if synchronized_output {
+                // The child is mid-frame inside its own synchronized output block,
+                // so the cursor is wherever its last painted cell left it. Herdr
+                // already declines to render and to publish a cursor until the
+                // block closes, so it must not record a position from inside one
+                // either: only note that a frame is in flight.
+                core.cursor_settle_state.observe_synchronized();
+            } else {
+                let cursor_started = crate::render_prof::timer();
+                let cursor_after_write = observed_cursor_state(&core);
+                crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
+                let placement = core.cursor_placement_tracker.placement();
+                core.cursor_settle_state.observe_with_placement(
+                    cursor_after_write,
+                    Instant::now(),
+                    placement,
+                );
+            }
         }
         #[cfg(windows)]
         let reported_cwd = if core.windows_powershell_prompt_cwd_reporting {
