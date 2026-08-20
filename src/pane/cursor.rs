@@ -90,10 +90,12 @@ pub(crate) struct CursorPositionSettleState {
     settled: Option<TerminalCursorState>,
     candidate: Option<TerminalCursorState>,
     pending_since: Option<Instant>,
+    last_observed: Option<Instant>,
 }
 
 impl CursorPositionSettleState {
     pub(crate) fn observe(&mut self, current: Option<TerminalCursorState>, now: Instant) {
+        let previous_observation = self.last_observed.replace(now);
         let Some(current) = current else {
             self.settled = None;
             self.candidate = None;
@@ -106,6 +108,21 @@ impl CursorPositionSettleState {
             self.pending_since = None;
             return;
         }
+
+        // A quiet gap means the previous write burst finished, so its last
+        // position was the one the child meant. Commit it and start fresh.
+        // Without this the max hold below eventually fires on the *first*
+        // position of the next burst, which is exactly the mid-redraw position
+        // we are trying not to expose, and settling on it makes every later
+        // redraw publish it with no hold at all.
+        if let (Some(candidate), Some(previous)) = (self.candidate, previous_observation) {
+            if now.duration_since(previous) >= CURSOR_POSITION_SETTLE {
+                self.settled = Some(candidate);
+                self.candidate = None;
+                self.pending_since = None;
+            }
+        }
+
         let Some(settled) = self.settled else {
             self.settled = Some(current);
             self.candidate = None;
@@ -231,20 +248,47 @@ mod tests {
         let now = Instant::now();
         let mut settle = CursorPositionSettleState::default();
         settle.observe(Some(cursor(1, 0, true, 0)), now);
-        settle.observe(Some(cursor(2, 0, true, 0)), now + Duration::from_millis(1));
-        settle.observe(
-            Some(cursor(3, 0, true, 0)),
-            now + CURSOR_POSITION_MAX_HOLD + Duration::from_millis(1),
-        );
+
+        // Churn arriving faster than the settle window never lets the burst
+        // end, so only the max hold can release the held position.
+        let mut at = now;
+        let mut last = 1u16;
+        while at.duration_since(now) < CURSOR_POSITION_MAX_HOLD + Duration::from_millis(10) {
+            at += Duration::from_millis(10);
+            last += 1;
+            settle.observe(Some(cursor(last, 0, true, 0)), at);
+        }
 
         assert!(!settle.pending());
         assert_eq!(
             settle.reported_cursor(
-                Some(cursor(3, 0, true, 0)),
-                now + CURSOR_POSITION_MAX_HOLD + Duration::from_millis(2),
+                Some(cursor(last, 0, true, 0)),
+                at + Duration::from_millis(1)
             ),
-            Some(cursor(3, 0, true, 0))
+            Some(cursor(last, 0, true, 0))
         );
+    }
+
+    #[test]
+    fn cursor_settle_commits_candidate_when_the_write_burst_ends() {
+        // Two redraws separated by an idle gap. The second redraw must not be
+        // able to settle on its own mid-redraw position.
+        let now = Instant::now();
+        let mut settle = CursorPositionSettleState::default();
+        let shell = cursor(2, 5, true, 0);
+        let caret = cursor(7, 34, true, 0);
+        let footer = cursor(33, 36, true, 0);
+
+        settle.observe(Some(shell), now);
+        settle.observe(Some(footer), now + Duration::from_millis(10));
+        settle.observe(Some(caret), now + Duration::from_millis(18));
+
+        settle.observe(Some(footer), now + Duration::from_millis(218));
+        let reported = settle
+            .reported_cursor(Some(footer), now + Duration::from_millis(220))
+            .expect("cursor");
+
+        assert_eq!((reported.x, reported.y), (caret.x, caret.y));
     }
 
     #[test]
