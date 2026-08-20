@@ -248,6 +248,34 @@ mod tests {
     }
 
     #[test]
+    fn cursor_settle_never_reports_a_mid_redraw_paint_position() {
+        let now = Instant::now();
+        let mut settle = CursorPositionSettleState::default();
+        settle.observe(Some(cursor(7, 19, true, 0)), now);
+
+        // A redraw leaves the cursor on the last repainted row before the child
+        // places it back on its input line.
+        settle.observe(Some(cursor(5, 23, true, 0)), now + Duration::from_millis(1));
+        assert_eq!(
+            settle.reported_cursor(Some(cursor(5, 23, true, 0)), now + Duration::from_millis(2)),
+            Some(cursor(7, 19, true, 0))
+        );
+
+        settle.observe(Some(cursor(8, 19, true, 0)), now + Duration::from_millis(3));
+        assert_eq!(
+            settle.reported_cursor(Some(cursor(8, 19, true, 0)), now + Duration::from_millis(4)),
+            Some(cursor(7, 19, true, 0))
+        );
+        assert_eq!(
+            settle.reported_cursor(
+                Some(cursor(8, 19, true, 0)),
+                now + CURSOR_POSITION_SETTLE + Duration::from_millis(1),
+            ),
+            Some(cursor(8, 19, true, 0))
+        );
+    }
+
+    #[test]
     fn cursor_settle_keeps_render_read_pure() {
         let now = Instant::now();
         let mut settle = CursorPositionSettleState::default();

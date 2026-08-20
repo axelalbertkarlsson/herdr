@@ -40,7 +40,11 @@ use super::{
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
 const KITTY_GRAPHICS_REDRAW_SETTLE: Duration = Duration::from_millis(20);
-const CURSOR_POSITION_SETTLE_ENABLED: bool = cfg!(windows);
+// Applications commonly finish a redraw with their cell writes and their final
+// cursor placement in separate PTY writes. Rendering in between would expose the
+// cell the child painted last instead of its real cursor, so hold a position
+// change until the child's output goes quiet. That is not platform specific.
+const CURSOR_POSITION_SETTLE_ENABLED: bool = true;
 const MODE_MOUSE_X10: u16 = 9;
 const MODE_MOUSE_PRESS_RELEASE: u16 = 1000;
 const MODE_MOUSE_BUTTON_MOTION: u16 = 1002;
@@ -1330,7 +1334,7 @@ impl GhosttyPaneTerminal {
             .unwrap_or(false);
         if CURSOR_POSITION_SETTLE_ENABLED {
             let cursor_started = crate::render_prof::timer();
-            let cursor_after_write = current_cursor_state(&mut core);
+            let cursor_after_write = observed_cursor_state(&core);
             crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
             core.cursor_settle_state
                 .observe(cursor_after_write, Instant::now());
@@ -2263,6 +2267,22 @@ fn render_delay_after_pty_write(
     } else {
         None
     }
+}
+
+/// Cursor position read straight from the terminal for the settle machine.
+///
+/// The PTY write path must not rebuild the render state: that is presentation
+/// work, and it would run for every pane on every read batch, including hidden
+/// ones. These are narrow scalar reads instead. The shape is left at the
+/// terminal default because `reported_cursor` always takes the shape from the
+/// live cursor, so an observed shape is never published.
+fn observed_cursor_state(core: &GhosttyPaneCore) -> Option<TerminalCursorState> {
+    Some(TerminalCursorState {
+        x: core.terminal.cursor_x().ok()?,
+        y: core.terminal.cursor_y().ok()?,
+        visible: core.terminal.cursor_visible().ok()?,
+        shape: 0,
+    })
 }
 
 fn current_cursor_state(core: &mut GhosttyPaneCore) -> Option<TerminalCursorState> {
@@ -4090,7 +4110,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn cursor_state_holds_pty_position_change_until_settle_window() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
@@ -4115,21 +4134,44 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn cursor_state_uses_live_position_when_settle_policy_disabled() {
+    fn cursor_state_hides_mid_redraw_position_from_split_pty_writes() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
 
-        pane.process_pty_bytes(pane_id, 0, b"x", &tx);
-        let result = pane.process_pty_bytes(pane_id, 0, b"\x1b[6;21H", &tx);
-
-        assert_eq!(result.render_delay, None);
+        // The child parks its caret on its input line.
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[20;8H", &tx);
         assert_eq!(
             pane.cursor_state()
                 .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
-            Some((20, 5, true))
+            Some((7, 19, true))
+        );
+
+        // A redraw reaches us in two PTY writes: the painted cells arrive first
+        // and leave the VT cursor on the last repainted row, and the child's real
+        // cursor placement only arrives in the write after it.
+        let painted = pane.process_pty_bytes(pane_id, 0, b"\x1b[24;1HReady", &tx);
+
+        assert_eq!(
+            pane.cursor_state()
+                .map(|cursor| (cursor.x, cursor.y, cursor.visible)),
+            Some((7, 19, true)),
+            "a mid-redraw paint position must never reach the host cursor"
+        );
+        assert_eq!(painted.render_delay, Some(CURSOR_POSITION_SETTLE));
+
+        let placed = pane.process_pty_bytes(pane_id, 0, b"\x1b[20;9H", &tx);
+
+        assert_eq!(placed.render_delay, Some(CURSOR_POSITION_SETTLE));
+        // Either caret position is fine once the child's placement arrives; the
+        // repainted row must not be.
+        let reported = pane
+            .cursor_state()
+            .map(|cursor| (cursor.x, cursor.y, cursor.visible));
+        assert!(
+            matches!(reported, Some((7, 19, true)) | Some((8, 19, true))),
+            "cursor left the input line: {reported:?}"
         );
     }
 
