@@ -1412,6 +1412,20 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn cursor_x(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_X)
+    }
+
+    /// Cursor row within the active area. Matches the render state's viewport
+    /// row whenever the viewport sits at the bottom of the screen.
+    pub fn cursor_y(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)
+    }
+
+    pub fn cursor_visible(&self) -> Result<bool, Error> {
+        self.get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE)
+    }
+
     pub fn effective_foreground_color(&self) -> Result<Option<RgbColor>, Error> {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_FOREGROUND)
     }
@@ -3779,6 +3793,33 @@ mod tests {
             terminal.viewport_hyperlink_uri(0, 0).unwrap().as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn terminal_cursor_reads_match_render_state_viewport_cursor() {
+        let mut terminal = Terminal::new(12, 3, 1_000).unwrap();
+        let mut render_state = RenderState::new().unwrap();
+
+        // Push rows into scrollback so the active area no longer starts at the
+        // first row of the grid.
+        terminal.write(b"one\r\ntwo\r\nthree\r\nfour\r\nab");
+        render_state.update(&terminal).unwrap();
+        let viewport = render_state
+            .cursor_viewport()
+            .unwrap()
+            .expect("cursor inside the viewport");
+
+        assert_eq!(
+            (terminal.cursor_x().unwrap(), terminal.cursor_y().unwrap()),
+            (viewport.x, viewport.y)
+        );
+        assert_eq!(
+            terminal.cursor_visible().unwrap(),
+            render_state.cursor_visible().unwrap()
+        );
+
+        terminal.write(b"\x1b[?25l");
+        assert!(!terminal.cursor_visible().unwrap());
     }
 
     #[test]
