@@ -282,6 +282,16 @@ impl CursorPositionSettleState {
             return;
         }
 
+        // The child closed a synchronized frame on a real cursor placement, so the
+        // frame is finished and the child has said where the cursor belongs. There
+        // is nothing left to settle: the settle window exists to guess at a
+        // position that may still move, and this one will not.
+        if closing_frame && placement == CursorPlacement::Positioned {
+            self.settled = Some(current);
+            self.clear_pending();
+            return;
+        }
+
         // The child closed a synchronized frame that ended on printed text, so
         // this is the cell the frame painted last and the real placement arrives
         // in a later write. Hold the previous position until it does instead of
@@ -606,18 +616,10 @@ mod tests {
             settle
                 .reported_cursor(Some(placed), now + Duration::from_millis(2))
                 .map(|reported| (reported.x, reported.y)),
-            Some((previous.x, previous.y))
-        );
-        assert_eq!(
-            settle
-                .reported_cursor(
-                    Some(placed),
-                    now + CURSOR_POSITION_SETTLE + Duration::from_millis(2)
-                )
-                .map(|reported| (reported.x, reported.y)),
             Some((placed.x, placed.y)),
-            "a placed cursor must be adopted on the ordinary settle schedule"
+            "a finished frame's own placement must not wait for a settle window"
         );
+        assert!(!settle.pending());
     }
 
     #[test]

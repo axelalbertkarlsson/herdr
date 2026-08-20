@@ -4227,11 +4227,13 @@ mod tests {
              become a pending cursor candidate"
         );
 
-        // Closing the bracket is the child's own statement that the frame is
-        // finished, so the position it leaves behind is the one worth adopting.
+        // Closing the bracket on a cursor placement is the child's own statement
+        // that the frame is finished and that this is where the cursor belongs.
         let closed = pane.process_pty_bytes(pane_id, 0, b"\x1b[20;9H\x1b[?2026l", &tx);
         assert!(closed.request_render);
-        assert_eq!(closed.render_delay, Some(CURSOR_POSITION_SETTLE));
+        // Nothing is left pending, so no deferred repaint is needed: this batch
+        // already asked for a render and the position is already adopted.
+        assert_eq!(closed.render_delay, None);
         let reported = pane
             .cursor_state()
             .map(|cursor| (cursor.x, cursor.y, cursor.visible));
